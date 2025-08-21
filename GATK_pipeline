@@ -1,0 +1,249 @@
+Preprocessing
+
+I) Mark Illumina Adapters
+This step identifies and marks sequencing adapters in the raw BAM file. Marking adapters prevents 
+them from interfering with alignment and variant calling, ensuring higher accuracy downstream.
+
+Command structure:
+gatk --java-options "-Djava.io.tmpdir=$TMP_LOCAL" \
+MarkIlluminaAdapters \
+-I Reads.u.bam \
+-M Reads_markilluminaadapters_metrics.txt \
+-O Reads_markilluminaadapters.bam
+
+
+II) Align reads with BWA-MEM and merge with uBAM using MergeBamAlignment
+After adapter marking, reads are converted to FASTQ and aligned to the reference genome using 
+BWA-MEM. The aligned reads are then merged with the original unmapped BAM (uBAM) to retain read 
+group information, proper pairing, and alignment metadata. This creates a clean, ready-to-use BAM file for variant calling.
+
+Command structure:
+gatk --java-options "-Xmx8G -Djava.io.tmpdir=$TMP_LOCAL" \
+SamToFastq \
+-I Reads_markilluminaadapters.bam \
+-F /dev/stdout \
+--CLIPPING_ATTRIBUTE XT --CLIPPING_ACTION 2 --INTERLEAVE -NON_PF | \
+bwa mem -M -t 8 -p \
+/path/to/reference.fa /dev/stdin | \
+gatk --java-options "-Xmx8G -Djava.io.tmpdir=$TMP_LOCAL" \
+MergeBamAlignment \
+--ALIGNED_BAM /dev/stdin \
+--UNMAPPED_BAM Reads.u.bam \
+-O Reads_mapped.bam \
+-R /path/to/reference.fa \
+--MAX_INSERTIONS_OR_DELETIONS -1 \
+--PRIMARY_ALIGNMENT_STRATEGY MostDistant \
+--ATTRIBUTES_TO_RETAIN XS
+
+
+III) GATK MarkDuplicates
+This step identifies and marks duplicate reads in the aligned BAM file. Duplicate reads often arise from PCR amplification during library preparation and can bias variant calling if not properly handled. Marking duplicates ensures that these redundant reads are ignored in downstream analyses, improving the accuracy of variant detection.
+
+gatk --java-options "-Djava.io.tmpdir=$TMP_LOCAL" \
+MarkDuplicates \
+-I Reads_mapped.bam \
+-M Reads_mapped_markdup_metrics.txt \
+-O Reads_mapped_markdup.bam
+
+Key Notes:
+-M Reads_mapped_markdup_metrics.txt generates a metrics file summarizing duplicate reads.
+Marked duplicates are not removed but flagged, so downstream tools can ignore them during variant calling.
+
+IV) Base Quality Score Recalibration (BQSR)
+Base Quality Score Recalibration corrects systematic errors made by the sequencer when estimating the quality of each base call. This process improves the accuracy of variant calling by adjusting base quality scores based on observed covariation patterns in the data.
+
+1) Analyze patterns of covariation in the sequence dataset
+Identify systematic errors in the raw BAM file using known variant sites.
+
+gatk --java-options "-Djava.io.tmpdir=$TMP_LOCAL" \
+BaseRecalibrator \
+-I Reads_mapped_markdup.bam \
+--known-sites /path/to/gallus_gallus.vcf.gz \
+-O Reads_BQSR_pass1.table \
+-R /path/to/reference.fna
+
+2) Apply the 1st recalibration to your sequence data (BQSR 1st pass)
+Adjust base quality scores based on the first recalibration table.
+
+gatk --java-options "-Djava.io.tmpdir=$TMP_LOCAL" \
+ApplyBQSR \
+-I Reads_mapped_markdup.bam \
+--bqsr-recal-file Reads_BQSR_pass1.table \
+-O Reads_BQSR_pass1.bam \
+-R /path/to/reference.fna
+
+3) Analyze patterns of covariation in the sequence based on the 1st recalibration
+Generate a second recalibration table to further refine quality scores.
+
+gatk --java-options "-Djava.io.tmpdir=$TMP_LOCAL" \
+BaseRecalibrator \
+-I Reads_BQSR_pass1.bam \
+--known-sites /path/to/gallus_gallus.vcf.gz \
+-O Reads_BQSR_pass2.table \
+-R /path/to/reference.fna
+
+4) Apply the 2nd recalibration to your sequence data (BQSR 2nd pass)
+Produce the final recalibrated BAM for downstream analyses.
+
+gatk --java-options "-Djava.io.tmpdir=$TMP_LOCAL" \
+ApplyBQSR \
+-I Reads_BQSR_pass1.bam \
+--bqsr-recal-file Reads_BQSR_pass2.table \
+-O Reads_BQSR_pass2.bam \
+-R /path/to/reference.fna
+
+5) Generate plots to compare outputs of 1st vs. 2nd recalibration
+Compare base quality metrics before and after recalibration to assess improvements.
+gatk --java-options "-Djava.io.tmpdir=$TMP_LOCAL" \
+AnalyzeCovariates \
+--before-report-file Reads_BQSR_pass1.table \
+--after-report-file Reads_BQSR_pass2.table \
+--plots-report-file Reads_BQSR_analysis.pdf
+
+Key Notes:
+Recalibration relies on known variant sites to avoid penalizing true genetic variants.
+Two-pass recalibration ensures that base quality scores are accurately adjusted.
+Diagnostic plots allow verification of the improvement in base quality estimation.
+
+V. Variant Discovery (Variant Calling)
+HaplotypeCaller
+HaplotypeCaller is used to identify both SNPs and indels in the recalibrated BAM file. It generates a GVCF for each sample, which allows for joint genotyping across multiple samples in later steps.
+
+Command Structure:
+gatk --java-options "-Djava.io.tmpdir=$TMP_LOCAL \
+-Xmx32g -XX:+UseParallelGC -XX:ParallelGCThreads=8" \
+HaplotypeCaller \
+-ERC GVCF \
+--native-pair-hmm-threads 8 \
+-I Reads_mapped_recal_pass2.bam \
+-R /path/to/reference.fa \
+--dbsnp /path/to/gallus_gallus.vcf.gz \
+-O Reads_HC.g.vcf.gz
+
+-ERC GVCF: Generates a GVCF file suitable for joint genotyping.
+--dbsnp: Incorporates known variant sites to improve variant calling accuracy.
+This step produces a high-quality, per-sample variant call file (GVCF) ready for merging and joint genotyping.
+
+VI. CombineGVCFs
+CombineGVCFs merges multiple per-sample GVCF files into a single GVCF. This is an essential step before joint genotyping, allowing all samples to be analyzed together for accurate variant detection across the cohort.
+
+gatk --java-options "-Xmx32g -Xcompressedrefs \
+-XX:+UseParallelGC -XX:ParallelGCThreads=8 \
+-Djava.io.tmpdir=$TMP_LOCAL" \
+CombineGVCFs \
+-V animal_1.g.vcf.gz \
+-V animal_2.g.vcf.gz \
+...
+-V animal_6.g.vcf.gz \
+-R /path/to/reference.fna \
+--dbsnp /path/to/gallus_gallus.vcf.gz \
+-O WL_BL_Combine.g.vcf.gz
+
+Key Notes:
+
+Merges multiple GVCF files without losing individual sample information.
+Prepares the dataset for joint genotyping using GenotypeGVCFs.
+Includes known variants (--dbsnp) to improve calling accuracy.
+
+VII. Joint Genotyping (GenotypeGVCFs)
+
+GenotypeGVCFs performs joint genotyping on the combined GVCF file, producing a final multi-sample VCF containing all identified variants. This step allows for consistent variant calls across the cohort and facilitates downstream analyses like annotation and population genetics.
+
+
+gatk --java-options "-Djava.io.tmpdir=$TMP_LOCAL" \
+GenotypeGVCFs \
+-V WL_BL_Combine.g.vcf.gz \
+-R /path/to/reference.fna \
+--dbsnp /path/to/gallus_gallus.vcf.gz \
+-O WL_BL_raw_variants.vcf.gz
+
+Key Notes:
+Generates a multi-sample VCF suitable for downstream analyses.
+Incorporates known variant sites (--dbsnp) to improve variant calling accuracy.
+Produces both SNPs and indels in a single, unified file.
+
+VIII. Variant Filtering (VQSR)
+
+Variant Quality Score Recalibration (VQSR) is used to filter variants based on a machine-learning model that distinguishes true variants from potential sequencing artifacts. This step improves the reliability of SNP and indel calls.
+
+Step 1: Build the Recalibration Model (VariantRecalibrator)
+This step generates a model using known variant resources and various annotation metrics.
+
+gatk --java-options "-Xmx16g \
+-XX:+UseParallelGC -XX:ParallelGCThreads=4 -Djava.io.tmpdir=$TMP_LOCAL" \
+VariantRecalibrator \
+--tmp-dir $TMP_LOCAL \
+-R /path/to/reference.fna \
+--variant WL_BL_raw_variants.vcf.gz \
+--sequence-dictionary /path/to/reference.dict \
+--output WL_BL_SNPs.recal \
+--tranches-file WL_BL_SNPs.tranches \
+--rscript-file WL_BL_SNPs.R \
+--resource:Affy_chip,known=false,training=true,truth=true,prior=15.0 /path/to/Gallus_gallus.GRCg6a/Galgal6_Affymetrix_600k.vcf.gz \
+--resource:Ensemble,known=true,training=false,truth=false,prior=2.0 /path/to/ gallus_gallus.vcf.gz \
+-an QD -an MQ -an MQRankSum -an ReadPosRankSum -an FS -an SOR \
+-mode SNP
+
+
+Step 2: Apply the Recalibration Model (ApplyVQSR)
+Filters the raw variant calls based on the recalibration model and a specified truth sensitivity threshold.
+
+gatk --java-options "-Xmx16g -XX:+UseParallelGC -XX:ParallelGCThreads=4 \
+-Djava.io.tmpdir=$TMP_LOCAL" \
+ApplyVQSR \
+-R /path/to/reference.fna \
+-V WL_BL_raw_variants.vcf.gz \
+-ts-filter-level 99 \
+--tranches-file WL_BL_SNPs.tranches \
+--recal-file WL_BL_SNPs.recal \
+-mode SNP \
+-O WL_BL_VQSR99.0.vcf.gz
+
+Key Notes:
+VariantRecalibrator builds a statistical model using known high-confidence variant sites.
+ApplyVQSR uses the model to filter variants, improving the overall accuracy of SNP calls.
+The --ts-filter-level 99 specifies a 99% truth sensitivity threshold for filtering.
+
+Variant Annotation with snpEff
+SnpEff is used to predict the functional effects of variants (SNPs and indels) on genes, transcripts, and proteins. It provides annotations such as synonymous, missense, or nonsense changes, helping interpret the biological impact of variants.
+
+Step 1: Install SnpEff
+Download and unzip the latest SnpEff release:
+
+Installing snpEff: wget https://snpeff.blob.core.windows.net/versions/snpEff_latest_core.zip
+unzip snpEff_latest_core.zip
+
+Step 2: Choose the Required Database
+List available databases and search for the desired genome:
+
+java -jar ~/bin/snpEff/snpEff.jar databases | grep gallus 
+
+Step 3: Annotate Variants
+Run SnpEff on the filtered VCF file to generate annotated variants:
+
+java -jar ~/bin/snpEff/snpEff.jar GRCg6a.99 WL_BL_VQSR99.0.vcf.gz > WL_BL_VQSR99.0_snpEff.vcf
+
+Notes:
+SnpEff provides detailed functional annotations for each variant.
+The output VCF includes additional INFO fields describing predicted effects on coding and non-coding regions.
+Annotated VCFs can be used for downstream analyses, including candidate gene prioritization and functional studies.
+
+
+X. Population Differentiation (FST Analysis with PLINK)
+
+FST (Fixation Index) measures genetic differentiation between populations. Using PLINK, you can calculate per-variant FST values to identify genomic regions with high differentiation, which may indicate selection or population structure.
+
+~/path/to/plink --vcf WL_BL_VQSR99.0.vcf.gz --allow-extra-chr --fst --within within.csv --chr 5 --chr-set 39
+
+otes:
+
+--vcf: Input the filtered and annotated VCF file.
+--allow-extra-chr: Allows analysis of non-standard chromosome names.
+--fst: Calculates per-variant FST values.
+--within: Uses a population assignment file (within.csv) to define groups for comparison.
+--chr 5 tells PLINK to analyze only chromosome 5.
+--chr-set 39 specifies the total number of chromosomes in the dataset (here, 39).
+The output provides FST statistics that can be used to identify population-specific variants or genomic regions under selection.
+
+
+
