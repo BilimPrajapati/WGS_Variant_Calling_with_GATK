@@ -1,8 +1,7 @@
 Preprocessing
 
 I) Mark Illumina Adapters
-This step identifies and marks sequencing adapters in the raw BAM file. Marking adapters prevents 
-them from interfering with alignment and variant calling, ensuring higher accuracy downstream.
+This step identifies and marks sequencing adapters in the raw BAM file. Marking adapters prevents them from interfering with alignment and variant calling, ensuring higher accuracy downstream.
 
 Command structure:
 gatk --java-options "-Djava.io.tmpdir=$TMP_LOCAL" \
@@ -13,8 +12,7 @@ MarkIlluminaAdapters \
 
 
 II) Align reads with BWA-MEM and merge with uBAM using MergeBamAlignment
-After adapter marking, reads are converted to FASTQ and aligned to the reference genome using 
-BWA-MEM. The aligned reads are then merged with the original unmapped BAM (uBAM) to retain read 
+After adapter marking, reads are converted to FASTQ and aligned to the reference genome using BWA-MEM. The aligned reads are then merged with the original unmapped BAM (uBAM) to retain read 
 group information, proper pairing, and alignment metadata. This creates a clean, ready-to-use BAM file for variant calling.
 
 Command structure:
@@ -37,8 +35,7 @@ MergeBamAlignment \
 
 
 III) GATK MarkDuplicates
-This step identifies and marks duplicate reads in the aligned BAM file. 
-Duplicate reads often arise from PCR amplification during library preparation and can bias variant calling if not properly handled.
+This step identifies and marks duplicate reads in the aligned BAM file. Duplicate reads often arise from PCR amplification during library preparation and can bias variant calling if not properly handled.
 Marking duplicates ensures that these redundant reads are ignored in downstream analyses, improving the accuracy of variant detection.
 
 Command structure:
@@ -48,14 +45,13 @@ MarkDuplicates \
 -M Reads_mapped_markdup_metrics.txt \
 -O Reads_mapped_markdup.bam
 
-Key Notes:
--M Reads_mapped_markdup_metrics.txt generates a metrics file summarizing duplicate reads.
-Marked duplicates are not removed but flagged, so downstream tools can ignore them during variant calling.
+Note:
+-M Reads_mapped_markdup_metrics.txt generates a metrics file summarizing duplicate reads.Marked duplicates are not removed but flagged, so downstream tools can ignore them during variant calling.
 
 
 IV) Base Quality Score Recalibration (BQSR)
-Base Quality Score Recalibration corrects systematic errors made by the sequencer when estimating the quality of each base call. 
-This process improves the accuracy of variant calling by adjusting base quality scores based on observed covariation patterns in the data.
+Base Quality Score Recalibration corrects systematic errors made by the sequencer when estimating the quality of each base call. This process improves the accuracy of variant calling by adjusting
+base quality scores based on observed covariation patterns in the data.
 
 1) Analyze patterns of covariation in the sequence dataset
 Identify systematic errors in the raw BAM file using known variant sites.
@@ -112,14 +108,11 @@ AnalyzeCovariates \
 --plots-report-file Reads_BQSR_analysis.pdf
 
 Key Notes:
-Recalibration relies on known variant sites to avoid penalizing true genetic variants.
-Two-pass recalibration ensures that base quality scores are accurately adjusted.
+Recalibration relies on known variant sites to avoid penalizing true genetic variants. Two-pass recalibration ensures that base quality scores are accurately adjusted.
 Diagnostic plots allow verification of the improvement in base quality estimation.
 
 V. Variant Discovery (Variant Calling)
-HaplotypeCaller
-HaplotypeCaller is used to identify both SNPs and indels in the recalibrated BAM file.
-It generates a GVCF for each sample, which allows joint genotyping across multiple samples in later steps.
+HaplotypeCaller is used to identify both SNPs and indels in the recalibrated BAM file. It generates a GVCF for each sample, which allows joint genotyping across multiple samples in later steps.
 
 Command Structure:
 gatk --java-options "-Djava.io.tmpdir=$TMP_LOCAL \
@@ -139,7 +132,7 @@ This step produces a high-quality, per-sample variant call file (GVCF) ready for
 
 VI. CombineGVCFs
 CombineGVCFs merges multiple per-sample GVCF files into a single GVCF. 
-This is an essential step before joint genotyping, allowing all samples to be analyzed together for accurate variant detection across the cohort.
+Essential step before joint genotyping, allowing all samples to be analyzed together for accurate variant detection across the cohort.
 
 Command structure:
 gatk --java-options "-Xmx32g -Xcompressedrefs \
@@ -148,8 +141,9 @@ gatk --java-options "-Xmx32g -Xcompressedrefs \
 CombineGVCFs \
 -V animal_1.g.vcf.gz \
 -V animal_2.g.vcf.gz \
+-V animal_3.g.vcf.gz \
 ...
--V animal_6.g.vcf.gz \
+-V animal_N.g.vcf.gz \
 -R /path/to/reference.fna \
 --dbsnp /path/to/gallus_gallus.vcf.gz \
 -O WL_BL_Combine.g.vcf.gz
